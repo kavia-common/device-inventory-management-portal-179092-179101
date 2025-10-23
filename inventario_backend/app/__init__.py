@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 
 from .routes.health import blp
+from .db import init_db, init_session
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -14,7 +15,7 @@ def create_app() -> Flask:
     """Create and configure the Flask application.
 
     Loads environment variables, configures CORS, sets OpenAPI/Swagger metadata,
-    and prepares hooks for database initialization in future steps.
+    and initializes the database engine and session for development use.
 
     Returns:
         Flask: The configured Flask application instance.
@@ -38,14 +39,15 @@ def create_app() -> Flask:
         supports_credentials=True,
     )
 
-    # Database configuration placeholders (future initialization)
-    # Prefer DATABASE_URL if provided, otherwise can be built from POSTGRES_* in a later step.
+    # Database configuration:
+    # Prefer DATABASE_URL if provided, otherwise construct from POSTGRES_* env vars.
     app.config["DATABASE_URL"] = os.getenv("DATABASE_URL")
 
-    # Example hook placeholders for later DB/session initialization
-    # from .db import init_db, init_session  # to be added later
-    # init_db(app.config["DATABASE_URL"])
-    # init_session(app)
+    # Initialize DB Engine and Session (dev-friendly: create tables if missing)
+    # In production, prefer migrations over create_all.
+    echo_sql = os.getenv("SQL_ECHO", "false").lower() in ("1", "true", "yes")
+    init_db(app.config["DATABASE_URL"], echo=echo_sql)
+    init_session()
 
     # Register API with Smorest
     api = Api(app)
