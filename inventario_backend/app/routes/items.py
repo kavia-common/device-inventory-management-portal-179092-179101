@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
+from io import BytesIO
+from flask import request, send_file
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 from marshmallow import Schema, fields
@@ -17,6 +19,7 @@ from ..schemas import (
     DEVICE_TYPES,
     STATUS_TYPES,
 )
+from ..services.excel_service import parse_items_from_excel, generate_items_excel
 
 # Blueprint definition with OpenAPI tags/description
 blp = Blueprint(
@@ -318,3 +321,113 @@ class ItemDetailResource(MethodView):
                 return ""
         except SQLAlchemyError as e:
             abort(500, message="Database error while deleting item.", errors={"detail": str(e)})
+
+
+class ImportSummarySchema(Schema):
+    """Response schema for import summary."""
+    created = fields.Int(required=True, description="Number of items successfully imported.")
+    failed = fields.Int(required=True, description="Number of rows that failed validation or DB errors.")
+    errors = fields.List(fields.Dict(), required=True, description="List of error objects with row and message.")
+
+
+@blp.route("/import")
+class ItemsImportResource(MethodView):
+    """Import inventory items from an uploaded Excel file."""
+
+    @blp.response(200, ImportSummarySchema)
+    @blp.doc(
+        summary="Import items from Excel",
+        description="Upload a .xlsx file (multipart/form-data, field 'file') to import inventory items. Returns summary.",
+        consumes=["multipart/form-data"],
+    )
+    def post(self):
+        """
+        Import items from an Excel (.xlsx) file.
+
+        Form:
+            file: The Excel file with a header row. Expected columns include device_type (required), brand, model, serial_number, owner, location, status, notes, asset_tag.
+
+        Returns:
+            Summary object: { created, failed, errors: [{row, message}] }
+        """
+        if "file" not in request.files:
+            abort(400, message="No file part in the request. Expecting form field 'file'.")
+        file = request.files["file"]
+        if not file or file.filename == "":
+            abort(400, message="No selected file.")
+        if not file.filename.lower().endswith(".xlsx"):
+            abort(400, message="Invalid file type. Please upload a .xlsx file.")
+
+        try:
+            items_data, parse_errors = parse_items_from_excel(file)
+        except Exception as e:
+            abort(400, message="Failed to parse Excel file.", errors={"detail": str(e)})
+
+        created_count = 0
+        failed_count = 0
+        errors: List[Dict[str, Any]] = list(parse_errors)
+
+        schema = InventoryItemCreateSchema()
+
+        # Insert rows
+        for idx, row in enumerate(items_data, start=2):  # row index in Excel (header=1)
+            try:
+                # Validate via schema (normalizes fields and enum checks)
+                valid = schema.load(row)
+                with session_scope() as session:
+                    item = InventoryItem(
+                        device_type=valid["device_type"],
+                        brand=valid.get("brand"),
+                        model=valid.get("model"),
+                        serial_number=valid.get("serial_number"),
+                        owner=valid.get("owner"),
+                        location=valid.get("location"),
+                        status=valid.get("status", "available"),
+                        notes=valid.get("notes"),
+                    )
+                    if hasattr(InventoryItem, "asset_tag") and "asset_tag" in valid:
+                        setattr(item, "asset_tag", valid.get("asset_tag"))
+                    session.add(item)
+                    # commit happens on context exit if all good
+                created_count += 1
+            except IntegrityError as e:
+                failed_count += 1
+                errors.append({"row": idx, "message": f"Integrity error: {str(e)}"})
+            except Exception as e:
+                failed_count += 1
+                errors.append({"row": idx, "message": str(e)})
+
+        return {"created": created_count, "failed": failed_count + len(parse_errors), "errors": errors}
+
+
+@blp.route("/export")
+class ItemsExportResource(MethodView):
+    """Export inventory items to an Excel file."""
+
+    @blp.doc(
+        summary="Export items to Excel",
+        description="Returns a .xlsx file containing all inventory items.",
+        produces=["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    )
+    def get(self):
+        """
+        Export inventory items to an Excel (.xlsx) spreadsheet.
+
+        Returns:
+            A streamed .xlsx file response.
+        """
+        try:
+            with session_scope() as session:
+                rows = session.execute(select(InventoryItem)).scalars().all()
+                data = [r.to_dict() for r in rows]
+            content = generate_items_excel(data)
+            return send_file(
+                BytesIO(content),  # type: ignore[name-defined]
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                as_attachment=True,
+                download_name="inventario_export.xlsx",
+            )
+        except SQLAlchemyError as e:
+            abort(500, message="Database error while exporting items.", errors={"detail": str(e)})
+        except Exception as e:
+            abort(500, message="Failed to generate export file.", errors={"detail": str(e)})
