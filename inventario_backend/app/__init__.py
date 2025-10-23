@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 
 from .routes.health import blp
+from .routes.items import blp as items_blp
 from .db import init_db, init_session
 
 # Load environment variables from .env if present
@@ -54,6 +55,7 @@ def create_app() -> Flask:
 
     # Register blueprints
     api.register_blueprint(blp)
+    api.register_blueprint(items_blp)
 
     # Expose api for openapi generation script compatibility
     app.extensions = getattr(app, "extensions", {})
