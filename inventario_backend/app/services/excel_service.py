@@ -82,7 +82,7 @@ def _extract_header_map(ws: Worksheet) -> Dict[int, str]:
             continue
         normalized = _normalize_header(str(name))
         if normalized:
-            mapping=i
+            # map column index to normalized field name
             mapping[i] = normalized
     return mapping
 
